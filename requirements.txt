@@ -1,6 +1,6 @@
 streamlit
 scenedetect[opencv]
-moviepy
+moviepy==1.0.3
 openai
 pandas
 opencv-python-headless
