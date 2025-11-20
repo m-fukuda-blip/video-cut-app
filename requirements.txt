@@ -1,0 +1,6 @@
+streamlit
+scenedetect[opencv]
+moviepy
+openai
+pandas
+opencv-python-headless
