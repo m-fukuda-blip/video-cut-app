@@ -28,20 +28,19 @@ def encode_image(image_path):
 
 def detect_scenes(video_path, threshold=27.0, min_scene_len=15, use_adaptive=False):
     """
-    高精度なシーン検出
-    ContentDetector: downscale_factor=1 で全画素チェック
-    AdaptiveDetector: 仕様上downscale設定不可のためデフォルトで使用
+    シーン検出ロジック
+    エラーの原因となるdownscale_factorを削除し、確実に動く基本設定に戻しています。
     """
     video_manager = VideoManager([video_path])
     scene_manager = SceneManager()
     
     # 検出器の選択
     if use_adaptive:
-        # AdaptiveDetectorは引数を減らしてエラー回避
+        # AdaptiveDetector: フェードなどに強い
         detector = AdaptiveDetector(adaptive_threshold=threshold, min_scene_len=min_scene_len)
     else:
-        # ContentDetector（通常モード）は全画素チェック(downscale_factor=1)で高精度に
-        detector = ContentDetector(threshold=threshold, min_scene_len=min_scene_len, downscale_factor=1)
+        # ContentDetector: 通常のカット変わりに強い
+        detector = ContentDetector(threshold=threshold, min_scene_len=min_scene_len)
 
     scene_manager.add_detector(detector)
     video_manager.start()
@@ -74,7 +73,7 @@ def process_video_and_analyze(api_key, video_file, max_scenes, threshold, min_sc
         st.error(f"ファイル保存エラー: {e}")
         return []
 
-    st.info("✂️ シーン検出中... (高精度モードのため時間がかかります)")
+    st.info("✂️ シーン検出中...")
     
     try:
         scenes = detect_scenes(video_path, threshold, min_scene_len, use_adaptive)
@@ -104,6 +103,7 @@ def process_video_and_analyze(api_key, video_file, max_scenes, threshold, min_sc
         thumb_filename = f"cut_{i+1:03}.jpg"
         thumb_path = os.path.join(TEMP_DIR, thumb_filename)
         
+        # 真ん中のフレームを取得
         capture_point = start_t + (duration * 0.5)
         
         try:
