@@ -5,6 +5,8 @@ import pandas as pd
 import shutil
 import zipfile
 import io
+import cv2
+import numpy as np
 from scenedetect import VideoManager, SceneManager
 from scenedetect.detectors import ContentDetector, AdaptiveDetector
 from moviepy.editor import VideoFileClip
@@ -13,6 +15,10 @@ from openai import OpenAI, RateLimitError
 # --- 設定 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMP_DIR = os.path.join(BASE_DIR, "temp_data")
+
+# 顔認識用の分類器（OpenCV標準）をロード
+face_cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+face_cascade = cv2.CascadeClassifier(face_cascade_path)
 
 def init_temp_dir():
     if os.path.exists(TEMP_DIR):
@@ -26,20 +32,70 @@ def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
+def evaluate_frame(frame_img):
+    """
+    フレームの品質をスコア化する関数
+    1. ブレていないか（鮮明度）
+    2. 人の顔が映っているか
+    """
+    # グレースケール変換
+    gray = cv2.cvtColor(frame_img, cv2.COLOR_RGB2GRAY)
+    
+    # 1. 鮮明度スコア（ラプラシアン分散）
+    # 数値が大きいほどエッジが効いている（ピントが合っている）
+    sharpness_score = cv2.Laplacian(gray, cv2.CV_64F).var()
+    
+    # 2. 顔検出ボーナス
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    face_bonus = 0
+    if len(faces) > 0:
+        # 顔が見つかったら、鮮明度に関わらず大きく加点（+300点）
+        # これにより「ブレてない風景」より「多少ブレてても人がいる」を優先する傾向にする
+        face_bonus = 300
+    
+    total_score = sharpness_score + face_bonus
+    return total_score
+
+def save_best_frame(clip, start, end, output_path):
+    """
+    指定区間からベストな（鮮明かつ顔がある）フレームを探して保存
+    """
+    duration = end - start
+    
+    # チェックする候補の数（多いほど正確だが遅くなる）
+    # 0.5秒以下の短いカットは真ん中1発勝負
+    if duration < 0.5:
+        t_candidates = [start + duration/2]
+    else:
+        # 始点と終点のギリギリは避けて、均等に5点サンプリング
+        t_candidates = np.linspace(start + 0.1, end - 0.1, num=5)
+
+    best_score = -1
+    best_t = t_candidates[0]
+
+    for t in t_candidates:
+        try:
+            # moviepyでフレーム取得 (numpy array)
+            frame = clip.get_frame(t)
+            score = evaluate_frame(frame)
+            
+            if score > best_score:
+                best_score = score
+                best_t = t
+        except:
+            continue
+    
+    # ベストな時間のフレームを保存
+    clip.save_frame(output_path, t=best_t)
+
+
 def detect_scenes(video_path, threshold=27.0, min_scene_len=15, use_adaptive=False):
-    """
-    シーン検出ロジック
-    エラーの原因となるdownscale_factorを削除し、確実に動く基本設定に戻しています。
-    """
     video_manager = VideoManager([video_path])
     scene_manager = SceneManager()
     
-    # 検出器の選択
     if use_adaptive:
-        # AdaptiveDetector: フェードなどに強い
         detector = AdaptiveDetector(adaptive_threshold=threshold, min_scene_len=min_scene_len)
     else:
-        # ContentDetector: 通常のカット変わりに強い
         detector = ContentDetector(threshold=threshold, min_scene_len=min_scene_len)
 
     scene_manager.add_detector(detector)
@@ -81,7 +137,7 @@ def process_video_and_analyze(api_key, video_file, max_scenes, threshold, min_sc
         st.error(f"シーン検出失敗: {e}")
         return []
 
-    st.write(f"合計 **{len(scenes)}** カット検出しました。")
+    st.write(f"合計 **{len(scenes)}** カット検出。ベストショット選抜を開始します...")
     
     if len(scenes) > max_scenes:
         st.warning(f"⚠️ デモ制限: 最初の {max_scenes} カットのみ処理します。")
@@ -98,18 +154,18 @@ def process_video_and_analyze(api_key, video_file, max_scenes, threshold, min_sc
         end_t = scene[1].get_seconds()
         duration = end_t - start_t
         
-        status_text.text(f"AI分析中: カット {i+1}/{len(scenes)}")
+        status_text.text(f"分析中: カット {i+1}/{len(scenes)} (ベストフレーム探索中...)")
         
         thumb_filename = f"cut_{i+1:03}.jpg"
         thumb_path = os.path.join(TEMP_DIR, thumb_filename)
         
-        # 真ん中のフレームを取得
-        capture_point = start_t + (duration * 0.5)
-        
+        # --- 改良点: ベストショット機能 ---
         try:
-            full_clip.save_frame(thumb_path, t=capture_point)
-        except:
+            save_best_frame(full_clip, start_t, end_t, thumb_path)
+        except Exception as e:
+            st.warning(f"フレーム保存エラー(skip): {e}")
             continue
+        # -----------------------------
 
         # 音声処理
         audio_path = os.path.join(TEMP_DIR, f"audio_{i}.mp3")
@@ -148,7 +204,7 @@ def process_video_and_analyze(api_key, video_file, max_scenes, threshold, min_sc
             analysis = response.choices[0].message.content
         except RateLimitError:
             analysis = "❌ Error: クレジット残高不足"
-            st.error("⚠️ OpenAIの利用枠超過 (429) です。Billing設定を確認してください。")
+            st.error("⚠️ OpenAIの利用枠超過 (429) です。")
         except Exception as e:
             analysis = f"エラー: {e}"
 
@@ -167,21 +223,17 @@ def process_video_and_analyze(api_key, video_file, max_scenes, threshold, min_sc
     return results
 
 # --- UI ---
-st.set_page_config(page_title="AIカット表メーカー Pro", layout="wide")
-st.title("🎬 AI映像カット表メーカー (高精度版)")
+st.set_page_config(page_title="AIカット表メーカー BestShot", layout="wide")
+st.title("🎬 AI映像カット表メーカー (ベストショット版)")
 
 with st.sidebar:
     api_key = st.text_input("OpenAI API Key", type="password")
     
     st.divider()
     st.header("検出設定")
-    
-    use_adaptive = st.checkbox("Adaptiveモードを使う", value=False, help="フェードやクロスディゾルブに強いモードです。")
-    
+    use_adaptive = st.checkbox("Adaptiveモードを使う", value=False)
     threshold = st.slider("感度 (Threshold)", 10.0, 60.0, 27.0)
-    
     min_scene_len = st.number_input("最小カット長 (フレーム)", value=15, min_value=1)
-    
     max_scenes_limit = st.number_input("最大分析数", 5, 100, 10)
 
 uploaded_file = st.file_uploader("動画 (MP4)", type=['mp4', 'mov'])
@@ -204,7 +256,7 @@ if uploaded_file and api_key:
             st.download_button(
                 label="📦 結果を一括ダウンロード (CSV+画像)",
                 data=zip_bytes,
-                file_name="cut_analysis_pro.zip",
+                file_name="cut_analysis_best.zip",
                 mime="application/zip"
             )
 
