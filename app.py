@@ -29,17 +29,18 @@ def encode_image(image_path):
 def detect_scenes(video_path, threshold=27.0, min_scene_len=15, use_adaptive=False):
     """
     高精度なシーン検出
-    downscale_factor=1 : 画像を縮小せず、元の画質のまま全フレーム判定する（遅いが正確）
+    ContentDetector: downscale_factor=1 で全画素チェック
+    AdaptiveDetector: 仕様上downscale設定不可のためデフォルトで使用
     """
     video_manager = VideoManager([video_path])
     scene_manager = SceneManager()
     
     # 検出器の選択
     if use_adaptive:
-        # アダプティブ: 動きの激しい映像や、フェードイン・アウトに強い
-        detector = AdaptiveDetector(adaptive_threshold=threshold, min_scene_len=min_scene_len, downscale_factor=1)
+        # AdaptiveDetectorは引数を減らしてエラー回避
+        detector = AdaptiveDetector(adaptive_threshold=threshold, min_scene_len=min_scene_len)
     else:
-        # コンテンツ: 単純なカット変わりに強い（downscale_factor=1で全画素チェック）
+        # ContentDetector（通常モード）は全画素チェック(downscale_factor=1)で高精度に
         detector = ContentDetector(threshold=threshold, min_scene_len=min_scene_len, downscale_factor=1)
 
     scene_manager.add_detector(detector)
@@ -76,7 +77,6 @@ def process_video_and_analyze(api_key, video_file, max_scenes, threshold, min_sc
     st.info("✂️ シーン検出中... (高精度モードのため時間がかかります)")
     
     try:
-        # ここで高精度の設定を渡す
         scenes = detect_scenes(video_path, threshold, min_scene_len, use_adaptive)
     except Exception as e:
         st.error(f"シーン検出失敗: {e}")
@@ -104,9 +104,7 @@ def process_video_and_analyze(api_key, video_file, max_scenes, threshold, min_sc
         thumb_filename = f"cut_{i+1:03}.jpg"
         thumb_path = os.path.join(TEMP_DIR, thumb_filename)
         
-        # 【工夫】真ん中だけでなく、少し前のフレームもチェックしてブレてないか見る実装も可能だが
-        # 今回は計算量節約のため「開始から20%」と「50%」の地点で安全な方をとる簡易ロジック
-        capture_point = start_t + (duration * 0.5) # 真ん中
+        capture_point = start_t + (duration * 0.5)
         
         try:
             full_clip.save_frame(thumb_path, t=capture_point)
@@ -178,13 +176,11 @@ with st.sidebar:
     st.divider()
     st.header("検出設定")
     
-    # 新機能: アルゴリズム選択
-    use_adaptive = st.checkbox("Adaptiveモードを使う", value=False, help="フェードや動きの激しい映像に強いですが、処理が遅くなります。")
+    use_adaptive = st.checkbox("Adaptiveモードを使う", value=False, help="フェードやクロスディゾルブに強いモードです。")
     
-    threshold = st.slider("感度 (Threshold)", 10.0, 60.0, 27.0, help="値を下げると細かい変化も検出します（過剰検出に注意）。")
+    threshold = st.slider("感度 (Threshold)", 10.0, 60.0, 27.0)
     
-    # 新機能: 最小フレーム数
-    min_scene_len = st.number_input("最小カット長 (フレーム)", value=15, min_value=1, help="これより短いカットはノイズとして無視します（15フレーム≒0.5秒）。")
+    min_scene_len = st.number_input("最小カット長 (フレーム)", value=15, min_value=1)
     
     max_scenes_limit = st.number_input("最大分析数", 5, 100, 10)
 
